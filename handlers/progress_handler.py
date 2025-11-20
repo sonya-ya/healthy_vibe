@@ -201,9 +201,29 @@ class ProgressHandler:
     def _show_charts_menu(self, message: Message) -> None:
         """Показать меню графиков."""
         user_id = str(message.from_user.id)
+        from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("📊 График веса тела", callback_data="chart_weight"))
+        markup.add(InlineKeyboardButton("💪 График выполненных тренировок", callback_data="chart_workouts"))
+        
+        # Получаем список упражнений для которых есть прогресс
+        try:
+            executions = self._storage.get_workout_executions(user_id)
+            exercises_set = set()
+            for execution in executions:
+                for ex_progress in execution.exercises_progress:
+                    if ex_progress.actual_weight:
+                        exercises_set.add(ex_progress.exercise_name)
+            
+            if exercises_set:
+                markup.add(InlineKeyboardButton("🏋️ График по упражнению", callback_data="chart_exercise_list"))
+        except Exception:
+            pass
+        
         self._bot.send_message(
             message.chat.id,
-            "📉 Графики прогресса\n\nФункция графиков будет доступна в ближайшее время.",
-            reply_markup=self._menu_handler.get_menu(user_id)
+            "📉 Графики прогресса\n\nВыберите график для отображения:",
+            reply_markup=markup
         )
 

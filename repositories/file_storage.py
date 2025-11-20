@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -18,6 +19,8 @@ from .models import (
     WorkoutPlan,
 )
 from .storage import StorageRepository
+
+logger = logging.getLogger(__name__)
 
 
 class FileStorageRepository(StorageRepository):
@@ -37,36 +40,58 @@ class FileStorageRepository(StorageRepository):
 
         if not self._profiles_path.exists():
             self._profiles_path.write_text("{}", encoding="utf-8")
+            logger.debug("Created profiles file: %s", self._profiles_path)
         if not self._reminders_path.exists():
             self._reminders_path.write_text("{}", encoding="utf-8")
+            logger.debug("Created reminders file: %s", self._reminders_path)
+        
+        logger.info("FileStorageRepository initialized: base_dir=%s", self._base_dir)
 
     # Utilities -----------------------------------------------------------------
     def _read_json(self, path: Path) -> Dict[str, object]:
+        logger.debug("Reading JSON file: %s", path)
         try:
             if not path.exists():
+                logger.debug("File does not exist, returning empty dict: %s", path)
                 return {}
             with path.open("r", encoding="utf-8") as file:
-                return json.load(file)
+                data = json.load(file)
+                logger.debug("JSON file read successfully: path=%s, keys_count=%d", path, len(data) if isinstance(data, dict) else 0)
+                return data
         except json.JSONDecodeError as exc:
+            logger.error("Failed to decode JSON from %s: %s", path, exc)
             raise StorageError(f"Cannot decode JSON from {path}") from exc
 
     def _write_json(self, path: Path, payload: Dict[str, object]) -> None:
+        logger.debug("Writing JSON file: %s, keys_count=%d", path, len(payload))
         temp_path = path.with_suffix(".tmp")
         with temp_path.open("w", encoding="utf-8") as file:
             json.dump(payload, file, ensure_ascii=False, indent=2, default=str)
         temp_path.replace(path)
+        logger.debug("JSON file written successfully: %s", path)
 
     # Profiles -------------------------------------------------------------------
     def get_profile(self, user_id: str) -> Optional[UserProfile]:
+        logger.debug("Getting profile: user_id=%s", user_id)
         data = self._read_json(self._profiles_path)
         raw = data.get(user_id)
-        return UserProfile.parse_obj(raw) if raw else None
+        if raw:
+            profile = UserProfile.parse_obj(raw)
+            logger.debug("Profile found: user_id=%s, goal=%s, experience=%s", 
+                        user_id, profile.goal, profile.experience)
+            return profile
+        else:
+            logger.debug("Profile not found: user_id=%s", user_id)
+            return None
 
     def save_profile(self, profile: UserProfile) -> None:
+        logger.info("Saving profile: user_id=%s, goal=%s, experience=%s", 
+                   profile.user_id, profile.goal, profile.experience)
         with self._lock:
             data = self._read_json(self._profiles_path)
             data[profile.user_id] = profile.dict()
             self._write_json(self._profiles_path, data)
+        logger.info("Profile saved successfully: user_id=%s", profile.user_id)
 
     # Workouts -------------------------------------------------------------------
     def _workout_path(self, user_id: str) -> Path:

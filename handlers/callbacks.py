@@ -6,10 +6,7 @@ from datetime import datetime
 from telebot import TeleBot
 from telebot.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
-from analytics.charts import generate_progress_chart
-from repositories.models import ProgressEntry
 from repositories.storage import StorageRepository
-from services.progress_service import ProgressService
 from services.workout_service import WorkoutService
 from utils.constants import DAY_NAMES, MEDICAL_DISCLAIMER
 
@@ -23,85 +20,54 @@ def _send_workout(bot: TeleBot, chat_id: int, workout_entry) -> None:
         text_lines.append(
             f"• {ex.name}: {ex.sets}х{ex.reps}{weight}"
         )
-    text_lines.append("\nНе забудьте отметить выполнение!")
-
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("Выполнено", callback_data="progress_done"))
-
-    bot.send_message(chat_id, "\n".join(text_lines), reply_markup=markup)
+    bot.send_message(chat_id, "\n".join(text_lines))
 
 
 def register_callback_handlers(
     bot: TeleBot,
-    progress_service: ProgressService,
     workout_service: WorkoutService,
     storage: StorageRepository,
     profile_conversation=None,
     workout_creation_manager=None,
 ) -> None:
-    @bot.callback_query_handler(func=lambda call: call.data == "progress_done")
-    def progress_done_callback(query: CallbackQuery) -> None:
-        user_id = str(query.from_user.id)
-        # Простое логирование через ProgressEntry (без конкретной тренировки)
-        # В будущем это можно заменить на WorkoutExecution с детальным прогрессом
-        entry = ProgressEntry(
-            user_id=user_id,
-            date=datetime.utcnow(),
-        )
-        progress_service.add_entry(entry)
-        bot.answer_callback_query(query.id, "Отлично, тренировка отмечена!")
-        bot.send_message(query.message.chat.id, f"Продолжайте в том же духе!\n\n{MEDICAL_DISCLAIMER}")
-        logger.info("Workout logged via callback for user %s", user_id)
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith("template_"))
     def template_callback(query: CallbackQuery) -> None:
         user_id = str(query.from_user.id)
+        template_id = query.data.replace("template_", "")
+        logger.info("Template callback: user_id=%s, template_id=%s", user_id, template_id)
+        
         profile = storage.get_profile(user_id)
         if not profile:
+            logger.warning("Profile not found for template selection: user_id=%s", user_id)
             bot.answer_callback_query(query.id, "Сначала заполните профиль!")
             return
 
-        template_id = query.data.replace("template_", "")
-        if template_id == "random":
-            focus = "legs"
-            workout_entry = workout_service.generate_daily_workout(profile, focus)
-        else:
-            workout_entry = workout_service.generate_daily_workout(profile, "legs", template_id=template_id)
-
-        # Сохраняем как standalone тренировку, а не как план
-        workout_service.save_standalone_workout(user_id, workout_entry)
-        bot.answer_callback_query(query.id, "Тренировка создана!")
-        _send_workout(bot, query.message.chat.id, workout_entry)
-        logger.info("Template workout created for user %s: %s", user_id, template_id)
-
-    @bot.callback_query_handler(func=lambda call: call.data == "analyse")
-    def analyse_callback(query: CallbackQuery) -> None:
-        user_id = str(query.from_user.id)
-        entries = progress_service.fetch_entries(user_id)
-        if not entries:
-            bot.answer_callback_query(query.id, "Нет данных для анализа")
-            bot.send_message(query.message.chat.id, "Пока нет записей о прогрессе. Отмечайте тренировки!")
-            return
-
-        summary = progress_service.summarize(user_id)
-        text = (
-            f"📊 Анализ прогресса:\n\n"
-            f"Всего сессий: {summary['sessions']}\n"
-            f"Средний вес: {summary['average_weight'] or '—'} кг\n\n"
-            f"Продолжайте в том же духе! 💪"
-        )
-        bot.answer_callback_query(query.id, "Анализ готов!")
-        bot.send_message(query.message.chat.id, text)
         try:
-            chart_path = generate_progress_chart(user_id, entries)
-            with chart_path.open("rb") as chart_file:
-                bot.send_photo(query.message.chat.id, chart_file)
-        except ValueError as e:
-            bot.send_message(query.message.chat.id, f"Недостаточно данных для графика: {e}")
+            if template_id == "random":
+                focus = "legs"
+                logger.debug("Generating random workout: user_id=%s, focus=%s", user_id, focus)
+                workout_entry = workout_service.generate_daily_workout(profile, focus)
+            else:
+                logger.debug("Generating workout from template: user_id=%s, template_id=%s", user_id, template_id)
+                workout_entry = workout_service.generate_daily_workout(profile, "legs", template_id=template_id)
+
+            logger.debug("Workout generated: user_id=%s, exercises_count=%d", 
+                        user_id, len(workout_entry.exercises))
+            
+            # Сохраняем как standalone тренировку, а не как план
+            workout_service.save_standalone_workout(user_id, workout_entry)
+            logger.info("Standalone workout saved: user_id=%s, template_id=%s", user_id, template_id)
+            
+            bot.answer_callback_query(query.id, "Тренировка создана!")
+            _send_workout(bot, query.message.chat.id, workout_entry)
+            logger.info("Template workout created and sent: user_id=%s, template_id=%s", user_id, template_id)
         except Exception as e:
-            logger.exception("Failed to generate chart: %s", e)
-            bot.send_message(query.message.chat.id, "Ошибка при генерации графика.")
-        logger.info("Progress analysis requested for user %s", user_id)
+            logger.exception("Error creating template workout: user_id=%s, template_id=%s, error=%s",
+                           user_id, template_id, str(e))
+            bot.answer_callback_query(query.id, "Ошибка при создании тренировки")
+            bot.send_message(query.message.chat.id, "Произошла ошибка. Попробуйте позже.")
+
 
     # Profile callbacks
     @bot.callback_query_handler(func=lambda call: call.data.startswith("profile_field_"))

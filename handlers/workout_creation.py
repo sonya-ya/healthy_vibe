@@ -34,6 +34,8 @@ class WorkoutCreationManager:
     def start_workout_creation(self, message: Message) -> None:
         """Начать процесс создания тренировки."""
         user_id = str(message.from_user.id)
+        logger.info("Starting workout creation: user_id=%s", user_id)
+        
         state_manager.set_state(
             user_id,
             "workout_creation",
@@ -44,6 +46,7 @@ class WorkoutCreationManager:
                 "current_step": "day",
             },
         )
+        logger.debug("Workout creation state initialized: user_id=%s", user_id)
         self._ask_day(message)
 
     def _ask_day(self, message: Message) -> None:
@@ -332,20 +335,37 @@ class WorkoutCreationManager:
 
     def save_workout(self, user_id: str, chat_id: int) -> None:
         """Сохранить тренировку."""
+        logger.info("Saving workout: user_id=%s", user_id)
+        
         state = state_manager.get_state(user_id, "workout_creation")
         if not state:
+            logger.warning("Workout creation state expired: user_id=%s", user_id)
             self._bot.send_message(chat_id, "Сессия истекла. Начните заново командой /createworkout")
             return
 
         day_of_week = state.get("day_of_week")
         exercises_data = state.get("exercises", [])
+        workout_name = state.get("workout_name")  # Получаем название из состояния
+
+        logger.debug("Workout data: user_id=%s, day=%s, exercises_count=%d, name=%s",
+                    user_id, day_of_week, len(exercises_data), workout_name)
 
         if not day_of_week:
+            logger.warning("Day of week not selected: user_id=%s", user_id)
             self._bot.send_message(chat_id, "Ошибка: день недели не выбран")
             return
 
         if not exercises_data:
+            logger.warning("No exercises added: user_id=%s", user_id)
             self._bot.send_message(chat_id, "Ошибка: не добавлено ни одного упражнения")
+            return
+
+        # Если название не задано, запросить его
+        if workout_name is None:
+            state["current_step"] = "workout_name"
+            state_manager.update_state(user_id, "workout_creation", state)
+            msg = self._bot.send_message(chat_id, "Введите название тренировки (или отправьте 'пропустить' для сохранения без названия):")
+            self._bot.register_next_step_handler(msg, self._handle_workout_name_input)
             return
 
         # Создать объекты Exercise
@@ -361,8 +381,12 @@ class WorkoutCreationManager:
                 )
             )
 
-        # Создать WorkoutEntry
-        workout_entry = WorkoutEntry(day_of_week=day_of_week, exercises=exercises)
+        # Создать WorkoutEntry с названием
+        workout_entry = WorkoutEntry(
+            day_of_week=day_of_week,
+            exercises=exercises,
+            workout_name=workout_name if workout_name and workout_name.lower() != "пропустить" else None
+        )
 
         # Сохранить как standalone тренировку, а не как план
         self._workout_service.save_standalone_workout(user_id, workout_entry)
@@ -372,7 +396,8 @@ class WorkoutCreationManager:
 
         # Показать результат
         day_name = DAY_NAMES.get(day_of_week, day_of_week)
-        text_lines = [f"✅ Тренировка на {day_name} сохранена!\n\nУпражнения:"]
+        name_text = f" '{workout_entry.workout_name}'" if workout_entry.workout_name else ""
+        text_lines = [f"✅ Тренировка{name_text} на {day_name} сохранена!\n\nУпражнения:"]
         for ex in exercises:
             weight_text = f", {ex.weight} кг" if ex.weight else ""
             text_lines.append(f"• {ex.name}: {ex.sets}x{ex.reps}{weight_text}")
@@ -380,6 +405,27 @@ class WorkoutCreationManager:
 
         self._bot.send_message(chat_id, "\n".join(text_lines))
         logger.info("Workout created for user %s, day %s", user_id, day_of_week)
+
+    def _handle_workout_name_input(self, message: Message) -> None:
+        """Обработать ввод названия тренировки."""
+        user_id = str(message.from_user.id)
+        workout_name = message.text.strip()
+        
+        state = state_manager.get_state(user_id, "workout_creation")
+        if not state:
+            self._bot.send_message(message.chat.id, "Сессия истекла. Начните заново командой /createworkout")
+            return
+        
+        # Сохраняем название (или None если "пропустить")
+        if workout_name.lower() == "пропустить":
+            state["workout_name"] = None
+        else:
+            state["workout_name"] = workout_name
+        
+        state_manager.update_state(user_id, "workout_creation", state)
+        
+        # Теперь сохраняем тренировку
+        self.save_workout(user_id, message.chat.id)
 
     def cancel_workout_creation(self, user_id: str, chat_id: int) -> None:
         """Отменить создание тренировки."""

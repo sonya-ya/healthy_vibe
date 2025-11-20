@@ -7,10 +7,8 @@ from typing import Optional
 from telebot import TeleBot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from analytics.charts import generate_progress_chart
-from repositories.models import ProgressEntry, ReminderConfig
+from repositories.models import ReminderConfig
 from repositories.storage import StorageRepository
-from services.progress_service import ProgressService
 from services.reminder_service import ReminderService
 from services.workout_service import WorkoutService
 from utils.constants import HELP_MESSAGE, MEDICAL_DISCLAIMER, WELCOME_MESSAGE
@@ -25,103 +23,84 @@ def _send_workout(bot: TeleBot, chat_id: int, workout_entry) -> None:
         text_lines.append(
             f"• {ex.name}: {ex.sets}х{ex.reps}{weight}"
         )
-    text_lines.append("\nНе забудьте отметить выполнение!")
-
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("Выполнено", callback_data="progress_done"))
-
-    bot.send_message(chat_id, "\n".join(text_lines), reply_markup=markup)
+    bot.send_message(chat_id, "\n".join(text_lines))
 
 
 def register_command_handlers(
     bot: TeleBot,
     storage: StorageRepository,
     workout_service: WorkoutService,
-    progress_service: ProgressService,
+    progress_service,
     reminder_service: ReminderService,
     menu_handler=None,
 ) -> None:
     @bot.message_handler(commands=["start"])
     def start_handler(message: Message) -> None:
         user_id = str(message.from_user.id)
+        username = message.from_user.username or "unknown"
+        logger.info("Command /start: user_id=%s, username=%s, chat_id=%d", 
+                   user_id, username, message.chat.id)
         if menu_handler:
             menu_handler.show_main_menu(message.chat.id, f"{WELCOME_MESSAGE}\n\n{HELP_MESSAGE}", user_id)
         else:
             bot.send_message(message.chat.id, f"{WELCOME_MESSAGE}\n\n{HELP_MESSAGE}")
+        logger.debug("Start command completed: user_id=%s", user_id)
 
     @bot.message_handler(commands=["help"])
     def help_handler(message: Message) -> None:
+        user_id = str(message.from_user.id)
+        logger.info("Command /help: user_id=%s", user_id)
         bot.send_message(message.chat.id, HELP_MESSAGE)
+        logger.debug("Help command completed: user_id=%s", user_id)
 
     @bot.message_handler(commands=["workout"])
     def workout_handler(message: Message) -> None:
         user_id = str(message.from_user.id)
+        logger.info("Command /workout: user_id=%s", user_id)
+        
         profile = storage.get_profile(user_id)
         if not profile:
+            logger.warning("Profile not found for workout command: user_id=%s", user_id)
             bot.send_message(message.chat.id, "Сначала заполните профиль командой /profile")
             return
 
         focus = "legs"
         if len(message.text.split()) > 1:
             focus = message.text.split()[1]
+            logger.debug("Workout focus specified: user_id=%s, focus=%s", user_id, focus)
 
-        templates = workout_service.get_available_templates(profile, focus)
-        if templates:
-            markup = InlineKeyboardMarkup(row_width=1)
-            for template in templates[:10]:  # Limit to 10 templates
-                markup.add(
-                    InlineKeyboardButton(
-                        f"{template.name}",
-                        callback_data=f"template_{template.template_id}",
+        try:
+            templates = workout_service.get_available_templates(profile, focus)
+            logger.debug("Available templates: user_id=%s, templates_count=%d", user_id, len(templates))
+            
+            if templates:
+                markup = InlineKeyboardMarkup(row_width=1)
+                for template in templates[:10]:  # Limit to 10 templates
+                    markup.add(
+                        InlineKeyboardButton(
+                            f"{template.name}",
+                            callback_data=f"template_{template.template_id}",
+                        )
                     )
+                markup.add(InlineKeyboardButton("Случайная тренировка", callback_data="template_random"))
+                bot.send_message(
+                    message.chat.id,
+                    "Выберите темплейт тренировки или случайную:",
+                    reply_markup=markup,
                 )
-            markup.add(InlineKeyboardButton("Случайная тренировка", callback_data="template_random"))
-            bot.send_message(
-                message.chat.id,
-                "Выберите темплейт тренировки или случайную:",
-                reply_markup=markup,
-            )
-        else:
-            # Fallback to random generation
-            workout_entry = workout_service.generate_daily_workout(profile, focus)
-            workout_service.save_standalone_workout(user_id, workout_entry)
-            _send_workout(bot, message.chat.id, workout_entry)
+                logger.info("Templates menu sent: user_id=%s, templates_count=%d", user_id, len(templates))
+            else:
+                # Fallback to random generation
+                logger.debug("No templates available, generating random workout: user_id=%s, focus=%s", user_id, focus)
+                workout_entry = workout_service.generate_daily_workout(profile, focus)
+                workout_service.save_standalone_workout(user_id, workout_entry)
+                _send_workout(bot, message.chat.id, workout_entry)
+                logger.info("Random workout generated and sent: user_id=%s, exercises_count=%d",
+                           user_id, len(workout_entry.exercises))
+        except Exception as e:
+            logger.exception("Error in workout handler: user_id=%s, error=%s", user_id, str(e))
+            bot.send_message(message.chat.id, "Произошла ошибка при создании тренировки. Попробуйте позже.")
 
-    @bot.message_handler(commands=["progress"])
-    def progress_handler(message: Message) -> None:
-        user_id = str(message.from_user.id)
-        # Команда /progress теперь показывает меню прогресса через кнопку меню
-        # Просто перенаправляем на кнопку меню
-        if menu_handler:
-            # Создаем временный объект сообщения с текстом кнопки
-            from handlers.progress_handler import ProgressHandler
-            # Но проще просто показать меню прогресса
-            # Для этого нужно получить progress_handler из контекста
-            # Пока просто показываем старое поведение, но с меню
-            entries = progress_service.fetch_entries(user_id)
-            summary = progress_service.summarize(user_id)
-            text = (
-                f"📊 Прогресс\n\n"
-                f"Всего сессий: {summary.get('sessions', 0)}\n"
-                f"Средний вес: {summary.get('average_weight') or '—'}\n\n"
-                f"Используйте меню '📊 Прогресс' для детальной информации."
-            )
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("Анализ прогресса", callback_data="analyse"))
-            bot.send_message(message.chat.id, text, reply_markup=markup)
-        else:
-            entries = progress_service.fetch_entries(user_id)
-            if not entries:
-                bot.send_message(message.chat.id, "Пока нет записей о прогрессе. Отмечайте тренировки!")
-                return
-            summary = progress_service.summarize(user_id)
-            text = (
-                f"Всего сессий: {summary.get('sessions', 0)}\n"
-                f"Средний вес: {summary.get('average_weight') or '—'}"
-            )
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("Анализ прогресса", callback_data="analyse"))
-            bot.send_message(message.chat.id, text, reply_markup=markup)
 
     @bot.message_handler(commands=["reminders"])
     def reminders_handler(message: Message) -> None:
@@ -158,33 +137,4 @@ def register_command_handlers(
         reminder_service.schedule_reminder(reminder)
         bot.send_message(message.chat.id, "Напоминание сохранено")
 
-    @bot.message_handler(commands=["createplan"])
-    def create_plan_handler(message: Message) -> None:
-        user_id = str(message.from_user.id)
-        profile = storage.get_profile(user_id)
-        if not profile:
-            bot.send_message(message.chat.id, "Сначала заполните профиль командой /profile")
-            return
-        focus_order = ["legs", "back", "cardio"]
-        entries = []
-        for focus in focus_order:
-            entries.append(workout_service.generate_daily_workout(profile, focus))
-        plan = workout_service.save_plan(user_id, entries)
-        bot.send_message(message.chat.id, f"План на {len(plan.entries)} тренировки сохранён")
 
-    @bot.message_handler(commands=["logworkout"])
-    def log_workout_handler(message: Message) -> None:
-        user_id = str(message.from_user.id)
-        # Простое логирование через ProgressEntry (без конкретной тренировки)
-        entry = ProgressEntry(
-            user_id=user_id,
-            weight=None,
-            measurements={},
-            mood=None,
-        )
-        progress_service.add_entry(entry)
-        reply_text = "Отлично! Тренировка отмечена.\n" + MEDICAL_DISCLAIMER
-        if menu_handler:
-            menu_handler.show_main_menu(message.chat.id, reply_text, user_id)
-        else:
-            bot.send_message(message.chat.id, reply_text)

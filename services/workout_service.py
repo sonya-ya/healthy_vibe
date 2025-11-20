@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 from datetime import date
 from typing import Iterable, List, Optional
@@ -7,6 +8,8 @@ from typing import Iterable, List, Optional
 from repositories.models import Exercise, UserProfile, WorkoutEntry, WorkoutPlan
 from repositories.storage import StorageRepository
 from services.workout_templates import WorkoutTemplate, get_template, get_templates_by_filters
+
+logger = logging.getLogger(__name__)
 
 FOCUS_EXERCISES = {
     "legs": [
@@ -40,7 +43,11 @@ class WorkoutService:
         template_id: Optional[str] = None,
     ) -> WorkoutEntry:
         """Generate workout from template or randomly."""
+        logger.info("Generating daily workout: user_id=%s, focus=%s, template_id=%s",
+                   profile.user_id, focus, template_id)
+        
         if template_id:
+            logger.debug("Loading template: template_id=%s", template_id)
             template = get_template(template_id)
             if template:
                 # Adjust weights based on profile
@@ -119,11 +126,18 @@ class WorkoutService:
     
     def save_standalone_workout(self, user_id: str, workout: WorkoutEntry) -> None:
         """Сохранить отдельную тренировку (не в плане)."""
+        logger.info("Saving standalone workout: user_id=%s, day=%s, exercises_count=%d, name=%s",
+                   user_id, workout.day_of_week, len(workout.exercises), 
+                   workout.workout_name or "unnamed")
+        
         if hasattr(self._storage, 'save_standalone_workout'):
             self._storage.save_standalone_workout(user_id, workout)
+            logger.debug("Standalone workout saved via storage method: user_id=%s", user_id)
         else:
             # Fallback: сохраняем как план с одной тренировкой
+            logger.warning("save_standalone_workout not available, using fallback: user_id=%s", user_id)
             self.save_plan(user_id, [workout])
+            logger.debug("Workout saved as plan (fallback): user_id=%s", user_id)
 
     def list_plans(self, user_id: str) -> List[WorkoutPlan]:
         return list(self._storage.get_workout_plans(user_id))
